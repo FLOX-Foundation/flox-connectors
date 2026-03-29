@@ -274,6 +274,20 @@ void BitgetExchangeConnector::handleMessage(std::string_view payload)
     auto dataEl = doc["data"];
     if (actionEl.error() && dataEl.error())
     {
+      // Check for subscription error response
+      auto eventEl = doc["event"];
+      if (!eventEl.error())
+      {
+        std::string_view event = eventEl.get_string().value();
+        if (event == "error")
+        {
+          auto codeEl = doc["code"];
+          auto msgEl = doc["msg"];
+          std::string code = codeEl.error() ? "?" : std::string(codeEl.get_string().value());
+          std::string msg = msgEl.error() ? "?" : std::string(msgEl.get_string().value());
+          _logger->error("[Bitget] Subscription error: code=" + code + " msg=" + msg);
+        }
+      }
       return;
     }
 
@@ -303,6 +317,10 @@ void BitgetExchangeConnector::handleMessage(std::string_view payload)
       auto evOpt = _bookPool.acquire();
       if (!evOpt)
       {
+        _logger->error(
+            "[Bitget] Book pool exhausted, dropping orderbook update. Increase "
+            "FLOX_DEFAULT_CONNECTOR_POOL_CAPACITY or ensure EventBus consumers are draining fast "
+            "enough.");
         return;
       }
       auto& ev = *evOpt;
@@ -387,7 +405,13 @@ void BitgetExchangeConnector::handleMessage(std::string_view payload)
 
       if (!ev->update.bids.empty() || !ev->update.asks.empty())
       {
-        _bookUpdateBus->publish(std::move(ev));
+        auto [res, _] = _bookUpdateBus->tryPublish(std::move(ev), std::chrono::microseconds(0));
+        if (res != BookUpdateBus::PublishResult::SUCCESS)
+        {
+          _logger->error(
+              "[Bitget] Book update dropped: EventBus full. Increase EventBus capacity or reduce "
+              "number of subscriptions.");
+        }
       }
     }
     else if (channel == "trade")
@@ -433,7 +457,13 @@ void BitgetExchangeConnector::handleMessage(std::string_view payload)
           }
         }
 
-        _tradeBus->publish(ev);
+        auto [res, _] = _tradeBus->tryPublish(ev, std::chrono::microseconds(0));
+        if (res != TradeBus::PublishResult::SUCCESS)
+        {
+          _logger->error(
+              "[Bitget] Trade dropped: EventBus full. Increase EventBus capacity or reduce number "
+              "of subscriptions.");
+        }
       }
     }
   }
